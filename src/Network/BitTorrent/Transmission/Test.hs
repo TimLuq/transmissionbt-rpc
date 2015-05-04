@@ -3,6 +3,7 @@
 module Main where
 
 import Prelude as P
+import System.Environment (lookupEnv)
 import Data.List as P
 import Data.HashMap.Strict (foldrWithKey)
 import Network.BitTorrent.Transmission
@@ -11,19 +12,21 @@ import Network.URI (parseURI)
 import qualified Network.Browser as Browser
 import Data.Foldable
 import Data.Char
+import Data.Maybe
+import Control.Applicative
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import System.IO
 import qualified Data.Aeson as JSON
 
 serverRPC :: IO String
-serverRPC = lookupEnv "TRANSMISSIONBT_TEST_URL" >> \x -> return $ case x of
+serverRPC = lookupEnv "TRANSMISSIONBT_TEST_URL" >>= \x -> return $ case x of
   Nothing -> "http://localhost:9091/transmission/rpc"
   Just x' -> x'
 
 main :: IO ()
 main = do
-  (Just service) <- serverRPC
+  (Just service) <- fmap parseURI serverRPC
   tcon <- transmissionConnect service
   runBrowserActionUnsafe tcon $ Browser.setDebugLog $ Just "/tmp/hs-transmissionbt-rpc.log"
   useractions tcon
@@ -68,18 +71,17 @@ details'' x' = do
       JSON.Object y -> '{' : P.intercalate "," (foldrWithKey (\k a b -> ((show k) ++ ": " ++ showjson a) : b) [] y) ++ "}"
       y             -> show y
 
-details_ :: Maybe TorrentInfoList -> IO ()
-details_ (Nothing) = putStrLn "Something went wrong..."
-details_ (Just rs) = forM_ (torrentInfoToList rs) $ \x' -> do
-  let x = torrentFields x'
-  putStr ">> "
-  case lookupTorrentField TorrentHashString x of
-   Nothing -> putStr "                                        "
-   Just xh -> T.putStr xh
-  putStr "  "
-  case lookupTorrentField TorrentName x of
-   Nothing -> putStrLn "(no name)"
-   Just xn -> putStrLn $ show xn
+details_ :: TransmissionConnection -> IO ()
+details_ con = do
+  d <- read <$> fromMaybe "140" <$> lookupEnv "COLUMNS"
+  r <- torrentGetList con allTorrents $
+       f d <$> getField TorrentHashString <*> getField TorrentName
+  putStrLn $ "Result size: " ++ show (length r)
+  P.mapM_ putStrLn r
+  where f d hash name =
+          let maxl  = if d < 80 then 20 else d - 60
+              name' = take maxl $ init $ tail $ show name
+          in ">> " ++ T.unpack hash ++ "  " ++ name' ++ replicate (maxl + 2 - length name') ' '
   
 
 details :: T.Text -> TransmissionConnection -> IO ()
@@ -146,6 +148,7 @@ useractions tcon = do
     else putStrLn "Quitting..."
   where actions = [ ("List all torrents",   list (makeFieldsRequest TorrentHashString +|+ TorrentName))
                   , ("Detailed listing",    list allTorrentFields)
+                  , ("Applicative listing", details_)
                   , ("Torrent details",     (\c -> (putStr "Torrent hash: " >> flush >> T.getLine >>= \h -> details h c)))
                   , ("Torrent files",       (\c -> (putStr "Torrent hash: " >> flush >> T.getLine >>= \h -> fileDetails h c)))
                   , ("Add torrent (by hash, magnet, or URL)", (\c -> (putStr "Torrent identifier: " >> flush >> T.getLine >>= \h -> add h c)))
